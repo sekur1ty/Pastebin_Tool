@@ -11,6 +11,7 @@ import os
 import base64
 import re
 import argparse
+import configparser
 
 # define all the global variables here
 stats = {}
@@ -22,8 +23,30 @@ pasteLimit = -1
 debug = False
 debugFileName = "/tmp/process_pastebin-Debug.txt"
 verboseOutput = False
+doScanWithClam = True   # do we can new pastes with Clam AV
+doSubmitHash2VirusTotal = True
+doLimitVirusTotalHashes = True
+virusTotalAPIKey = ''
+virusTotalCallTimes = [] # Array of last four times virutotal was called. Oldest at [0]
 
 # define all the subroutines/functions we'll be using
+
+def getConfigFile():
+    global virusTotalAPIKey
+
+    debugPrint("Entering getConfigFile")
+    config = configparser.ConfigParser()
+    try:
+        config.read_file(open('process_pastebin.ini'))
+    except:
+        debugPrint ("read of process_pastebin.ini failed:")
+        print ("read of process_pastebin.ini failed, exiting")
+        exit()
+    if 'VirusTotal' in config:
+        if 'virusTotalAPIKey' in config['VirusTotal']:
+            virusTotalAPIKey = config['VirusTotal']['VirusTotalAPIKey']
+            debugPrint ("virusTotalAPIKey set to: \"" + virusTotalAPIKey+"\"")
+
 
 def initDebug():
     global dbgFile
@@ -38,7 +61,7 @@ def debugPrint(message):
     global dbgFile
     if debug:
         logTime = time.strftime("%x %X", time.localtime())
-        dbgFile.write(logTime + ": " + message + "\n")
+        dbgFile.write(logTime + ": " + message.strip() + "\n")  # with or without \n, output ends with \n
         dbgFile.flush()
 
 def writeStatsToFile():
@@ -90,13 +113,27 @@ def writeMalwareToFile(name, paste):
     # We have a special directory for pastes identified as malware
     baseDir = "/home/del/Work/Pastebin/Malware/"
     fileName = baseDir + name
-    #print ("writing malware to: " + fileName)
+    debugPrint ("writing Malware to: " + name + "\n")
     try:
         f = open(fileName, "wb")
         f.write(paste)
         f.close
     except:
         print ("Write to " + fileName + "failed")
+        debugPrint ("Write to " + fileName + "failed")
+
+def writeVirusTotalHitToFile(name, paste):
+    # We have a special directory for pastes identified as malware by VT
+    baseDir = "/home/del/Work/Pastebin/VirusTotal/"
+    fileName = baseDir + name
+    debugPrint ("writing Virus Total Hit to: " + name + "\n")
+    try:
+        f = open(fileName, "wb")
+        f.write(paste)
+        f.close
+    except:
+        print ("Write to " + fileName + "failed")
+        debugPrint ("Write to " + fileName + "failed")
 
 def parseCmdArgs():
     global runDuration
@@ -148,11 +185,23 @@ def logValidBase64():
     sys.stdout.write("#")
     sys.stdout.flush()
 
+def logClamDetectedMaleware():
+    sys.stdout.write("M")
+    sys.stdout.flush()
+
+def logVirusTotalDetectedMaleware():
+    sys.stdout.write("v")
+    sys.stdout.flush()
+
+def logVirusTotalDetections(numberDetections):
+    sys.stdout.write("(" + str(numberDetections) + ")")
+    sys.stdout.flush()
+
 
 def decodeBase64(key, data):
     global stats
     decoded = ''
-    debugPrint ("Entering decodeBase64, length of input data = " + str(len(data)))
+    debugPrint ("Entering decodeBase64, key = " + str(key) + ", length of input data = " + str(len(data)))
     if not re.search('\s|http', str(data)):  # rule out trivial cases
         debugPrint ("... ruled out trivial case, trying to decode")
         try:
@@ -171,14 +220,115 @@ def decodeBase64(key, data):
     debugPrint ("Exiting decodeBase64,  validBinary = " + str(validBinary))
     return [validBinary, decoded]
 
+def scanWithClam(key, data):
+    global stats
+    debugPrint ("Entering scanWithClam, key = " + str(key) + ", length of input data = " + str(len(data)))
+    # scan binries with Clam AV
+    p = subprocess.Popen('clamscan -',stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        stdin=subprocess.PIPE,
+        shell=True,
+        bufsize=0)
+    p.stdin.write(data)
+    out = str(p.communicate()[0])
+    scanInfo = ''
+    if re.search(".*Infected\s+files:\s+0.*", out):
+        infected = False
+        scanInfo += out
+        sys.stdout.write(".")
+        sys.stdout.flush()
+
+    else:
+        writeMalwareToFile(key, data)
+        debugPrint ("-----**** Infected File **** ---------------\n")
+        #debugPrint ("Full URL: " + fullUrl)
+        debugPrint ("Key: " + key + "\n")
+        debugPrint (str(out) + "\n")
+        #print (out)
+        debugPrint ("--------------------------------------------\n")
+        logClamDetectedMaleware()
+        stats['malwareFilesSeen'] += 1
+
+# end scan with clamscan
+
+def analyzeVirusTotalResult (result):
+    debugPrint ("Entering analyzeVirusTotalResult\n")
+    numberPositives = result['positives']
+    allScans = result['scans']
+    detectedCount = 0
+    debugPrint ("Number positives: " + str(numberPositives) + "\n")
+    for scan in allScans.keys():
+        debugPrint ("      in loop. type(scan) = " + str(type(scan)) + ", scan = " + scan + "\n")
+        scanName = scan
+        detected = result['scans'][scan]['detected']
+        if detected:
+            detectedCount += 1
+        debugPrint ("     " + scanName + ": detected = " + str(detected) + "\n")
+    debugPrint ("detectedCount = " + str(detectedCount))
+    return detectedCount
+
+def submitHash2VirusTotal (key, hash, pasteData):
+    global virusTotalAPIKey
+    global virusTotalCallTimes  # Array of last for times virutotal was called
+
+    #print ("submitHash2VirusTotal: key = " + key + " hash = " + hash + "\n")
+    # Determine if we've used up our 4 queries per minute
+    debugPrint ("Entering SubmitHash2VirusTotal. key: " + str(key) + ", hash: " + str(hash))
+    now = time.time()  # seconds since epoch
+    virusTotalCallLimitExceeded = False
+    if len(virusTotalCallTimes) == 4:
+        if (now - virusTotalCallTimes[0]) <= 60:  # We've already done 4 calls within last minute
+            virusTotalCallLimitExceeded = True
+            print ("Exceeded Call Limit.  Key = " + key)
+            debugPrint ("Exceeded Call Limit.  Key = " + key)
+        virusTotalCallTimes[0:2] = virusTotalCallTimes[1:3]
+        virusTotalCallTimes[3] = now
+    else:
+        virusTotalCallTimes.append(now) # popu;late first 4 times
+    if virusTotalCallLimitExceeded:
+        debugPrint ("virusTotalCallLimit has been Exceeded, skipping " + key)
+        return
+
+    #
+    # Send the hash to virus total
+    #
+
+    url = 'https://www.virustotal.com/vtapi/v2/file/report'
+    values = {'apikey' : virusTotalAPIKey,
+              'resource' : hash}
+    queryData = urllib.parse.urlencode(values)
+    queryData = queryData.encode('ascii') # data should be bytes
+    debugPrint("sendng request: queryData = " + str(queryData))
+    req = urllib.request.Request(url, queryData)
+
+    with urllib.request.urlopen(req) as response:
+        the_page = response.read()
+    jsonResult = json.loads(the_page)
+    #print ("virus total response code: " + str(jsonResult['response_code']) + " message: " + jsonResult['verbose_msg'])
+    if jsonResult['response_code'] == 1:  # Virus Total has seen this before
+        debugPrint ("got a postive result from Virus Total\n")
+        debugPrint (str(the_page) + "\n")
+        numberDetections = analyzeVirusTotalResult(jsonResult)
+        if numberDetections > 0:
+            logVirusTotalDetections(numberDetections)
+        else:
+            logVirusTotalDetectedMaleware()
+        writeVirusTotalHitToFile(key, pasteData)
+    elif jsonResult['response_code'] == -2: # already submitted and scan is still running
+        debugPrint ("got a \"scan is still running\" (-2) from Virus Total")
+        logVirusTotalDetections(0)   # really a placeholder until I write a wait-till-done
+    #print (the_page)
+    debugPrint("exiting SubmitHash2VirusTotal, response_code was: " + str(jsonResult['response_code']))
+
+# This is the main processing routine
 def main():
 
     global stats
     global pasteKeysSeen
 
     parseCmdArgs()
-
     initDebug()
+    getConfigFile()
 
     sawFiles = {}
     stats['duplicatePastes'] = 0
@@ -230,7 +380,7 @@ def main():
                 key = pasteObject['key']
                 title = pasteObject['title']
 
-                # Check to see if we've seen this paste before
+                # Check to see if we've seen this paste before - based on name
                 if key in pasteKeysSeen:
                     duplicateKeys += 1
                     pasteKeysSeen[key] += 1
@@ -244,7 +394,6 @@ def main():
                 try:
                     with urllib.request.urlopen('https://scrape.pastebin.com/api_scrape_item.php?i=' + key) as response:
                         pasteData = response.read()
-                        #print (pasteData)
                 except Exception as e:
                     logPasteFetchFailed()
                     debugPrint("Fetch of paste \"" + key + "\" failed: " + str(e))
@@ -258,40 +407,18 @@ def main():
                     sawFiles[pasteHash] += 1
                     stats['duplicatePastes'] += 1
                 else:
-                    # First time for this paste
+                    # First time for this paste content
                     sawFiles[pasteHash] = 1
                     validBinary = False
+                    # If it decodes e.g. base64, we'll call it a binary
                     if doDecodeBase64:
                         validBinary, decoded = decodeBase64(key, pasteData)
                     if validBinary:
-                        #print ("Got a valid binary: " + str(key))
-                        #p = subprocess.Popen('cat > ' + key + '.bin',stdout=subprocess.PIPE,
-                        p = subprocess.Popen('clamscan -',stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT,
-                            stdin=subprocess.PIPE,
-                            shell=True,
-                            bufsize=0)
-                        p.stdin.write(decoded)
-                        out = str(p.communicate()[0])
-                        #print ("result from clamcan: " + str(out))
-                        scanInfo = ''
-                        if re.search(".*Infected\s+files:\s+0.*", out):
-                            infected = False
-                            scanInfo += out
-                            sys.stdout.write(".")
-                            sys.stdout.flush()
-
-                        else:
-                            writeMalwareToFile(key, decoded)
-                            #print ('-----**** Infected File **** ---------------')
-                            #print ("Full URL: " + fullUrl)
-                            #print ("Key: " + key)
-                            #print ("Title: " + title)
-                            #print (out)
-                            #print ('--------------------------------------------')
-                            sys.stdout.write("M")
-                            sys.stdout.flush()
-                            stats['malwareFilesSeen'] += 1
+                        decodedPasteHash = hashlib.sha256(decoded).hexdigest()
+                        if doScanWithClam:
+                            scanWithClam(key, decoded)
+                        if doSubmitHash2VirusTotal:
+                            submitHash2VirusTotal(key, decodedPasteHash, decoded)
                 #  end for pasteObject in jsonResult
 
             # notify if we didn't get all we asked for, otherwise mark time
@@ -306,6 +433,7 @@ def main():
     except KeyboardInterrupt:
         pass
 
+    # We're done collecting pastes.  Save Stats, and print summary
     currentTime = time.time()
     actualRunDuration = currentTime - startTime
     stats['mostRecentRunDuration'] = actualRunDuration
@@ -317,8 +445,9 @@ def main():
         if sawFiles[hash] > stats['maxTimesSeenHashFiles']:
             stats['maxTimesSeenHashFiles'] = sawFiles[hash]
 
-    print ("\n--------------------")
     writeStatsToFile()
+
+    print ("\n--------------------")
     formattedRunDuration = str(actualRunDuration) + " seconds"
     if actualRunDuration > 60:
         formattedRunDuration = "Around " + "%.3f" % (actualRunDuration/60) + " minutes"
