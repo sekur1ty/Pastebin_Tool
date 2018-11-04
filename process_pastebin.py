@@ -16,6 +16,7 @@ import configparser
 # define all the global variables here
 stats = {}
 statsFileName = '/home/del/Work/Pastebin/stats.txt'
+logFileName = '/home/del/Work/Pastebin/pasteLog.txt'
 pasteKeysSeen = {}
 runDuration = -1
 sleepDuration = -1
@@ -56,13 +57,22 @@ def initDebug():
         dbgFile.write(logTime + ": " + "Starting Debug File" + "\n")
         dbgFile.flush()
 
+def initLogFile():
+    global logFile
+    logFile = open(logFileName, "a")
+    debugPrint ("log file " + logFileName + " is open")
 
 def debugPrint(message):
     global dbgFile
     if debug:
         logTime = time.strftime("%x %X", time.localtime())
-        dbgFile.write(logTime + ": " + message.strip() + "\n")  # with or without \n, output ends with \n
+        dbgFile.write(logTime + ": " + message.rstrip() + "\n")  # with or without \n, output ends with \n
         dbgFile.flush()
+
+def logPrint (message):
+    global logFile
+    logFile.write(message)
+    logFile.flush()
 
 def writeStatsToFile():
     global stats
@@ -175,6 +185,10 @@ def printStartMessage():
     print ("runDuration: " + formattedRunDuration)
     print ("sleepDuration: " + str(sleepDuration) + " seconds")
     print ("pasteLimit: " + str(pasteLimit) + " pastes per query")
+    print ("Progress codes:")
+    print ("\"!\"\tFetch Failed\t\t\t\".\"\tSuccessful Fetch of pasteLimit pastes")
+    print ("\"#\"\tbase64 detected\t\t\t\"C\"\tClamAV Detection")
+    print ("\"(#)\"\tVirus Total # Detections\t\"s\"\tVirus Total scan is in progress")
     print ("--------------------")
 
 def logPasteFetchFailed():
@@ -186,11 +200,11 @@ def logValidBase64():
     sys.stdout.flush()
 
 def logClamDetectedMaleware():
-    sys.stdout.write("M")
+    sys.stdout.write("C")
     sys.stdout.flush()
 
-def logVirusTotalDetectedMaleware():
-    sys.stdout.write("v")
+def logVirusTotalScanStillRunning():
+    sys.stdout.write("s")
     sys.stdout.flush()
 
 def logVirusTotalDetections(numberDetections):
@@ -235,8 +249,6 @@ def scanWithClam(key, data):
     if re.search(".*Infected\s+files:\s+0.*", out):
         infected = False
         scanInfo += out
-        sys.stdout.write(".")
-        sys.stdout.flush()
 
     else:
         writeMalwareToFile(key, data)
@@ -246,7 +258,12 @@ def scanWithClam(key, data):
         debugPrint (str(out) + "\n")
         #print (out)
         debugPrint ("--------------------------------------------\n")
+        malwareName = ''
+        isMalwareName = re.search("stdin:\s+(.+)\s+FOUND", out)
+        if isMalwareName:
+            malwareName = isMalwareName.group(1)
         logClamDetectedMaleware()
+        logPrint(" Clam_found_malware(" + malwareName + ")")
         stats['malwareFilesSeen'] += 1
 
 # end scan with clamscan
@@ -257,13 +274,16 @@ def analyzeVirusTotalResult (result):
     allScans = result['scans']
     detectedCount = 0
     debugPrint ("Number positives: " + str(numberPositives) + "\n")
+    debugPrint ("About to loop through results. There are " + str(len(allScans)) + " results. ")
     for scan in allScans.keys():
-        debugPrint ("      in loop. type(scan) = " + str(type(scan)) + ", scan = " + scan + "\n")
         scanName = scan
+        resultString = ""
         detected = result['scans'][scan]['detected']
         if detected:
             detectedCount += 1
-        debugPrint ("     " + scanName + ": detected = " + str(detected) + "\n")
+            resultString = ": result = \"" + result['scans'][scan]['result'] + "\""
+            logPrint (" " + scan + ": \"" + result['scans'][scan]['result'] + "\"" )
+        debugPrint ("     " + scanName + ": detected = " + str(detected) + resultString + "\n")
     debugPrint ("detectedCount = " + str(detectedCount))
     return detectedCount
 
@@ -301,22 +321,32 @@ def submitHash2VirusTotal (key, hash, pasteData):
     debugPrint("sendng request: queryData = " + str(queryData))
     req = urllib.request.Request(url, queryData)
 
-    with urllib.request.urlopen(req) as response:
-        the_page = response.read()
-    jsonResult = json.loads(the_page)
+    debugPrint ("about to read response")
+    try:
+        with urllib.request.urlopen(req) as response:
+            the_page = response.read()
+    except Exception as e:
+        debugPrint ("HTTP request to Virus Total failed: " + str(e))
+        return # Just quietly slink away
+    try:
+        jsonResult = json.loads(the_page)
+    except json.decoder.JSONDecodeError:
+        debugPrint ("---------- JSONDecodeError on the_page from Virus Total ------------")
+        debugPrint (str(the_page))
+        debugPrint ("--------------------------------------------------------------------")
+        return # Just bail
     #print ("virus total response code: " + str(jsonResult['response_code']) + " message: " + jsonResult['verbose_msg'])
     if jsonResult['response_code'] == 1:  # Virus Total has seen this before
         debugPrint ("got a postive result from Virus Total\n")
         debugPrint (str(the_page) + "\n")
+        logPrint(" positive_from_Virus_Total")
         numberDetections = analyzeVirusTotalResult(jsonResult)
-        if numberDetections > 0:
-            logVirusTotalDetections(numberDetections)
-        else:
-            logVirusTotalDetectedMaleware()
+        logPrint ("(" + str(numberDetections) + ")")
+        logVirusTotalDetections(numberDetections)
         writeVirusTotalHitToFile(key, pasteData)
     elif jsonResult['response_code'] == -2: # already submitted and scan is still running
         debugPrint ("got a \"scan is still running\" (-2) from Virus Total")
-        logVirusTotalDetections(0)   # really a placeholder until I write a wait-till-done
+        logVirusTotalScanStillRunning()   # really a placeholder until I write a wait-till-done
     #print (the_page)
     debugPrint("exiting SubmitHash2VirusTotal, response_code was: " + str(jsonResult['response_code']))
 
@@ -328,6 +358,7 @@ def main():
 
     parseCmdArgs()
     initDebug()
+    initLogFile()
     getConfigFile()
 
     sawFiles = {}
@@ -409,6 +440,7 @@ def main():
                 else:
                     # First time for this paste content
                     sawFiles[pasteHash] = 1
+                    logPrint ("\n" + str(key))
                     validBinary = False
                     # If it decodes e.g. base64, we'll call it a binary
                     if doDecodeBase64:
@@ -423,7 +455,7 @@ def main():
 
             # notify if we didn't get all we asked for, otherwise mark time
             if NumPastesThisTime != pasteLimit:
-                print ("\nProcessed: " + str(NumPastesThisTime) + " pastes this time")
+                print ("\nProcessed: " + str(NumPastesThisTime) + " pastes this time. Requested: " + str(pasteLimit))
             else:
                 sys.stdout.write(".")
                 sys.stdout.flush()
