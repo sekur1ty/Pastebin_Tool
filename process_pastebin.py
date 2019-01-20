@@ -157,14 +157,21 @@ def parseCmdArgs():
         action="store_true")
     parser.add_argument("-d", "--debug", help="turn on debug output",
         action="store_true")
-    parser.add_argument("rDuration", help="<Run Duration (minutes)>", type=int)
-    parser.add_argument("sDuration", help="<Sleep Duration (seconds)>", type=int)
-    parser.add_argument("pLimit", help="# pastes to request in each call", type=int)
+    #parser.add_argument("rDuration", help="<Run Duration (minutes), \"0\" means never stop>", type=int)
+    parser.add_argument("-r", "--runDuration", help="<Run Duration (minutes) - how long to run this program (\"0\", the default, means never stop)>", type=int, default = 0)
+    #parser.add_argument("Duration", help="<Sleep Duration (seconds)>", type=int)
+    parser.add_argument("-s", "--sleepDuration", help="<Sleep Duration (seconds) - how long to wait between queries (default is 60)>", type=int, default = 60)
+    #parser.add_argument("pLimit", help="# pastes to request in each call", type=int)
+    parser.add_argument("-p","--pasteLimit", help="# pastes to request in each query (default is 100)", type=int, default = 100)
     args = parser.parse_args()
 
-    runDuration = args.rDuration * 60
-    sleepDuration = args.sDuration
-    pasteLimit = args.pLimit
+    #runDuration = args.rDuration * 60  # convert from default minutes to seconds
+    #sleepDuration = args.sDuration
+    #pasteLimit = args.pLimit
+
+    runDuration = args.runDuration * 60  # convert from default minutes to seconds
+    sleepDuration = args.sleepDuration
+    pasteLimit = args.pasteLimit
     debug = args.debug
     verboseOutput = args.verbose
 
@@ -182,6 +189,8 @@ def printStartMessage():
         formattedRunDuration = "Around " + "%.3f" % (runDuration/60) + " minutes"
     if runDuration > 3600:
         formattedRunDuration = "Around " + "%.3f" % (runDuration/3600) + " hours"
+    if runDuration == 0:
+        formattedRunDuration = "until the end of time (or a system reboot, whichever comes first)"
     print ("runDuration: " + formattedRunDuration)
     print ("sleepDuration: " + str(sleepDuration) + " seconds")
     print ("pasteLimit: " + str(pasteLimit) + " pastes per query")
@@ -385,7 +394,7 @@ def main():
     # the paste is a duplicate
 
     try:
-        while currentTime < doneTime:
+        while (currentTime < doneTime) or (runDuration == 0):
             # Get a new list of available pastes
             with urllib.request.urlopen('https://scrape.pastebin.com/api_scraping.php?limit='+str(pasteLimit)) as response:
                 newPasteList = response.read()
