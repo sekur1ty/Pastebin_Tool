@@ -190,7 +190,7 @@ def printStartMessage():
     if runDuration > 3600:
         formattedRunDuration = "Around " + "%.3f" % (runDuration/3600) + " hours"
     if runDuration == 0:
-        formattedRunDuration = "until the end of time (or a system reboot, whichever comes first)"
+        formattedRunDuration = "Until the end of time (or a system reboot, whichever comes first)"
     print ("runDuration: " + formattedRunDuration)
     print ("sleepDuration: " + str(sleepDuration) + " seconds")
     print ("pasteLimit: " + str(pasteLimit) + " pastes per query")
