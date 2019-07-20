@@ -381,13 +381,18 @@ def scanWithRegEx (key, data):
     regexSearchResult = regexToSearch.search(str(data))
     if regexSearchResult:
         matchingExpression = regexSearchResult.group()
+        if len(matchingExpression) > 20:
+            foundRegEx = '"' + matchingExpression[:20] + '" - truncated'
+        else:
+            foundRegEx = '"' + matchingExpression + '"'
+
         writeRegexMatchToFile(key, data)
         logRegExMatched()
-        logPrint(" regEx_matched ("+matchingExpression+")")
+        logPrint(" regEx_matched ("+foundRegEx+")")
         stats['malwareFilesSeen'] += 1
 
         debugPrint ("-----**** Infected File **** (RegEx Match) -\n")
-        debugPrint ("Key: " + key + "MatchingExpression: " + matchingExpression +"\n")
+        debugPrint ("Key: " + key + "   MatchingExpression: " + foundRegEx +"\n")
         debugPrint ("--------------------------------------------\n")
         # todo - search regex groups to find what matched.
     debugPrint ("Exiting scanWithRegEx (%.3f)" % (time.time() - startTime))
@@ -464,6 +469,7 @@ def analyzeVirusTotalResult (result):
         if detected:
             detectedCount += 1
             resultString = ": result = \"" + result['scans'][scan]['result'] + "\""
+            resultString += ": update = \"" + result['scans'][scan]['update'] + "\""
             logPrint (" " + scan + ": \"" + result['scans'][scan]['result'] + "\"" )
         debugPrint ("     " + scanName + ": detected = " + str(detected) + resultString + "\n")
     debugPrint ("detectedCount = " + str(detectedCount))
@@ -522,9 +528,10 @@ def submitHash2VirusTotal (key, hash, pasteData):
     if jsonResult['response_code'] == 1:  # Virus Total has seen this before
         debugPrint ("got a postive result from Virus Total\n")
         debugPrint (str(the_page) + "\n")
-        logPrint(" positive_from_Virus_Total")
+        logPrint(" positive_from_Virus_Total (" + str(jsonResult['positives']) + ") ")
         numberDetections = analyzeVirusTotalResult(jsonResult)
-        logPrint ("(" + str(numberDetections) + ")")
+        if numberDetections > 0:
+            logPrint ("(" + str(numberDetections) + ")")
         logVirusTotalDetections(numberDetections)
         writeVirusTotalHitToFile(key, pasteData)
     elif jsonResult['response_code'] == -2: # already submitted and scan is still running
@@ -634,7 +641,8 @@ def main():
                 else:
                     # First time for this paste content
                     sawFiles[pasteHash] = 1
-                    logPrint ("\n" + str(key))
+                    logTime = time.strftime("%x %X", time.localtime())
+                    logPrint ("\n" + logTime + " " + str(key))
                     validBinary = False
                     fileToCheck = pasteData
                     # If it decodes e.g. base64, we'll call it a binary
