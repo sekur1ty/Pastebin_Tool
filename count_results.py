@@ -21,6 +21,8 @@ except Exception as e:
 for input in pasteLogFile.readlines():
     if Debug: print (input.strip())
     isClamFound = re.search("(.+) Clam_found_malware\((\S+)\)(.*)", input.strip())
+    isRegExFound = re.search("(.+) regEx_matched \((.+)\)", input.strip())
+    # We're not counting VT yet.
     if isClamFound:
         #print ("Clam found " + isClamFound.group(2) + " in " + isClamFound.group(1))
         if isClamFound.group(2) in virusCount:
@@ -34,9 +36,18 @@ for input in pasteLogFile.readlines():
                     virusCount[virusName] += 1
                 else:
                     virusCount[virusName] = 1
+    if isRegExFound:
+        if len(isRegExFound.group(2)) > 20:
+            foundRegEx = '"' + isRegExFound.group(2)[:20] + '" - truncated'
+        else:
+            foundRegEx = '"' + isRegExFound.group(2) + '"'
+        if ("regex match (" + foundRegEx + ")") in virusCount:
+            virusCount["regex match (" + foundRegEx + ")"] += 1
+        else:
+            virusCount["regex match (" + foundRegEx + ")"] = 1
 
-# Now that we've read the entire log file, loop though the array and print
-# how many times each virus name was encountered in the log file.
+# Now that we've read the entire log file, print a sorted list of how many
+# times each virus name was encountered in the log file.
 
-for virusName in virusCount.keys():
-    print (virusCount[virusName], virusName)
+for virusName in sorted(virusCount, key=virusCount.get):
+    print ("{},{}".format(virusCount[virusName], virusName))
