@@ -12,11 +12,15 @@ import base64
 import re
 import argparse
 import configparser
+import gzip
+import io
 
 # define all the global variables here
 stats = {}
 statsFileName = '/home/del/Work/Pastebin/stats.txt'
 logFileName = '/home/del/Work/Pastebin/pasteLog.txt'
+regexFileName = '/home/del/Work/Pastebin/process_pastebin_regex.txt'
+regexExcludeFileName = '/home/del/Work/Pastebin/process_pastebin_regex_exclude.txt'
 pasteKeysSeen = {}
 runDuration = -1
 sleepDuration = -1
@@ -27,6 +31,11 @@ verboseOutput = False
 doScanWithClam = True   # do we can new pastes with Clam AV
 doSubmitHash2VirusTotal = True
 doLimitVirusTotalHashes = True
+doSearchRegEx = True  # do we check new pastes against a regEx
+doLogRegExExcluded = True
+regexToSearch = re.compile("")  # get's the compiled regex object
+regexToExclude = re.compile("")  # get's the compiled regexToExclude object
+commentRegex = re.compile("\s*#") # Any line starting with '#' is a comment
 virusTotalAPIKey = ''
 virusTotalCallTimes = [] # Array of last four times virutotal was called. Oldest at [0]
 
@@ -34,6 +43,7 @@ virusTotalCallTimes = [] # Array of last four times virutotal was called. Oldest
 
 def getConfigFile():
     global virusTotalAPIKey
+    global doLogRegExExcluded
 
     debugPrint("Entering getConfigFile")
     config = configparser.ConfigParser()
@@ -43,11 +53,75 @@ def getConfigFile():
         debugPrint ("read of process_pastebin.ini failed:")
         print ("read of process_pastebin.ini failed, exiting")
         exit()
+    if 'default' in config:
+        if 'doLogRegExExcluded' in config['default']:
+            doLogRegExExcluded = (config['default']['doLogRegExExcluded'] == 'True')
+            debugPrint ("doLogRegExExcluded set to: \"" + str(doLogRegExExcluded) + "\"")
+
     if 'VirusTotal' in config:
         if 'virusTotalAPIKey' in config['VirusTotal']:
             virusTotalAPIKey = config['VirusTotal']['VirusTotalAPIKey']
             debugPrint ("virusTotalAPIKey set to: \"" + virusTotalAPIKey+"\"")
 
+def getRegEx():
+    global regexToSearch
+
+    debugPrint("Entering getRegEx")
+    regexToSearchString = ''
+    if os.path.isfile(regexFileName):
+        try:
+            regexFile = open(regexFileName, 'r')
+        except:
+            debugPrint ("read of " + regexFileName + " failed:")
+            print ("read of " + regexFileName + " failed, exiting")
+            exit()
+
+        for line in regexFile:
+            if commentRegex.search(line):
+                continue   # skip comments
+            regexToSearchString += "(" + line.rstrip() + ")|"
+        regexToSearchString = regexToSearchString.rstrip('|')  # lose the extra |
+        debugPrint ("regexToSearchString: \"" + regexToSearchString + "\"")
+
+        try:
+            regexToSearch = re.compile(regexToSearchString)
+        except:
+            debugPrint ("re.compile of regexToSearchString failed")
+            print ("re.compile of regular expression in " + regexFileName + " failed.")
+            exit()
+    else:
+        print ("Couldn't find regEx file: " + regexFileName + ". Not doing regEx searches")
+        # Just use default empty regEx
+
+def getRegExExclusion():
+    global regexToExclude
+
+    debugPrint("Entering getRegExExclusion")
+    regexToExcludeString = ''
+    if os.path.isfile(regexExcludeFileName):
+        try:
+            regexExcludeFile = open(regexExcludeFileName, 'r')
+        except:
+            debugPrint ("open of " + regexExcludeFileName + " failed:")
+            print ("open of " + regexExcludeFileName + " failed, exiting")
+            exit()
+
+        for line in regexExcludeFile:
+            if commentRegex.search(line):
+                continue   # skip comments
+            regexToExcludeString += "(" + line.rstrip() + ")|"
+        regexToExcludeString = regexToExcludeString.rstrip('|')  # lose the extra |
+        debugPrint ("regexToExcludeString: \"" + regexToExcludeString + "\"")
+
+        try:
+            regexToExclude = re.compile(regexToExcludeString)
+        except:
+            debugPrint ("re.compile of regexToExcludeString failed")
+            print ("re.compile of regular expression to exclude in " + regexExcludeFileName + " failed.")
+            exit()
+    else:
+        print ("Couldn't find regEx Exclusion file: " + regexExcludeFileName + ". Not doing regEx exclusion")
+        # Just use default empty regEx
 
 def initDebug():
     global dbgFile
@@ -145,6 +219,19 @@ def writeVirusTotalHitToFile(name, paste):
         print ("Write to " + fileName + "failed")
         debugPrint ("Write to " + fileName + "failed")
 
+def writeRegexMatchToFile(name, paste):
+    # We have a special directory for pastes identified as malware
+    baseDir = "/home/del/Work/Pastebin/RegExMatch/"
+    fileName = baseDir + name
+    debugPrint ("writing regex match to: " + name + "\n")
+    try:
+        f = open(fileName, "wb")
+        f.write(paste)
+        f.close
+    except:
+        print ("Write regex match to " + fileName + "failed")
+        debugPrint ("Write regex match to " + fileName + "failed")
+
 def parseCmdArgs():
     global runDuration
     global sleepDuration
@@ -175,7 +262,6 @@ def parseCmdArgs():
     debug = args.debug
     verboseOutput = args.verbose
 
-
 def printStartMessage():
     global runDuration
     global sleepDuration
@@ -196,8 +282,10 @@ def printStartMessage():
     print ("pasteLimit: " + str(pasteLimit) + " pastes per query")
     print ("Progress codes:")
     print ("\"!\"\tFetch Failed\t\t\t\".\"\tSuccessful Fetch of pasteLimit pastes")
-    print ("\"#\"\tbase64 detected\t\t\t\"C\"\tClamAV Detection")
+    print ("\"#\"\tBase64 detected\t\t\t\"C\"\tClamAV Detection")
     print ("\"(#)\"\tVirus Total # Detections\t\"s\"\tVirus Total scan is in progress")
+    print ("\"R\"\tRegEx Detection\t\t\t\"E\"\tRegEx Exclusion")
+    print ("\"Z\"\tZipped Content")
     print ("--------------------")
 
 def logPasteFetchFailed():
@@ -212,6 +300,43 @@ def logClamDetectedMaleware():
     sys.stdout.write("C")
     sys.stdout.flush()
 
+def checkIfZipped(potential_zipped):
+    debugPrint ("Entering checkIfZipped. Len of potential_zipped = " + str(len(potential_zipped)))
+    # defend against unexpected data types
+    if type(potential_zipped) is not bytes:
+        debugPrint ('trying to encode potential_zipped. It is type: ' + str(type(potential_zipped)))
+        potential_zipped = potential_zipped.encode('utf-8')
+        debugPrint ("done encoding potential_zipped")
+
+    fakeFile = io.BytesIO()
+    fakeFile.write(potential_zipped)
+    fakeFile.seek(0)
+    with gzip.GzipFile(fileobj=fakeFile, mode='rb') as unzippedFile:
+        try:
+            gunzippedBytes = unzippedFile.read()
+        except Exception as e:  # Apparently there are other rare failure modes
+        #except OSError:  # not a gzipped file
+            if e == OSError:
+                debugPrint ("unzip failed, not a .gz file.  Returning False")
+                return False, ''
+            else:
+        #except Excepton as e:  # Apparently there are other rare failure modes
+                debugPrint ("unzip general failure: " +str(e))
+                return False, ''
+
+    debugPrint ("returning True.  Length of unzipped = " + str(len(gunzippedBytes)))
+    #return True, gunzippedBytes.decode()
+    return True, gunzippedBytes
+
+def logRegExMatched():
+    sys.stdout.write("R")
+    sys.stdout.flush()
+
+def logRegExExcluded():
+    if doLogRegExExcluded:
+        sys.stdout.write("E")
+        sys.stdout.flush()
+
 def logVirusTotalScanStillRunning():
     sys.stdout.write("s")
     sys.stdout.flush()
@@ -220,6 +345,9 @@ def logVirusTotalDetections(numberDetections):
     sys.stdout.write("(" + str(numberDetections) + ")")
     sys.stdout.flush()
 
+def logZippedDetected():
+    sys.stdout.write("Z")
+    sys.stdout.flush()
 
 def decodeBase64(key, data):
     global stats
@@ -243,8 +371,53 @@ def decodeBase64(key, data):
     debugPrint ("Exiting decodeBase64,  validBinary = " + str(validBinary))
     return [validBinary, decoded]
 
+def scanWithRegEx (key, data):
+    global regexToSearch
+    global stats
+    startTime = time.time()
+    debugPrint ("Entering scanWithRegEx, key = " + str(key) + ", length of input data = " + str(len(data)))
+
+    #if (type(data) is str) and regexToSearch.search(data):
+    regexSearchResult = regexToSearch.search(str(data))
+    if regexSearchResult:
+        matchingExpression = regexSearchResult.group()
+        writeRegexMatchToFile(key, data)
+        logRegExMatched()
+        logPrint(" regEx_matched ("+matchingExpression+")")
+        stats['malwareFilesSeen'] += 1
+
+        debugPrint ("-----**** Infected File **** (RegEx Match) -\n")
+        debugPrint ("Key: " + key + "MatchingExpression: " + matchingExpression +"\n")
+        debugPrint ("--------------------------------------------\n")
+        # todo - search regex groups to find what matched.
+    debugPrint ("Exiting scanWithRegEx (%.3f)" % (time.time() - startTime))
+
+def excludeWithRegEx (key, data):
+    # Return true if we did exclude the paste
+    global regexToExclude
+    global stats
+    startTime = time.time()
+    debugPrint ("Entering excludeWithRegEx, key = " + str(key) + ", length of input data = " + str(len(data)))
+
+    #if (type(data) is str) and regexToSearch.search(data):
+    regexExcludeResult = regexToExclude.search(str(data))
+    if regexExcludeResult:
+        matchingExpression = regexExcludeResult.group()
+        logRegExExcluded()
+        logPrint(" regEx_excluded ("+matchingExpression+")")
+        ##stats['regexExcludedCount'] += 1
+
+        debugPrint ("-----**** Excluded File **** (RegEx Excluded) -\n")
+        debugPrint ("Key: " + key + "  MatchingExpression: " + matchingExpression +"\n")
+        debugPrint ("--------------------------------------------\n")
+
+        return True
+    debugPrint ("Exiting excludeWithRegEx (%.3f)" % (time.time() - startTime))
+    return False
+
 def scanWithClam(key, data):
     global stats
+    startTime = time.time()
     debugPrint ("Entering scanWithClam, key = " + str(key) + ", length of input data = " + str(len(data)))
     # scan binries with Clam AV
     p = subprocess.Popen('clamscan -',stdout=subprocess.PIPE,
@@ -274,8 +447,8 @@ def scanWithClam(key, data):
         logClamDetectedMaleware()
         logPrint(" Clam_found_malware(" + malwareName + ")")
         stats['malwareFilesSeen'] += 1
-
-# end scan with clamscan
+    debugPrint ("Exiting scanWithClam (%.3f)" % (time.time() - startTime))
+    # end scan with clamscan
 
 def analyzeVirusTotalResult (result):
     debugPrint ("Entering analyzeVirusTotalResult\n")
@@ -302,6 +475,7 @@ def submitHash2VirusTotal (key, hash, pasteData):
 
     #print ("submitHash2VirusTotal: key = " + key + " hash = " + hash + "\n")
     # Determine if we've used up our 4 queries per minute
+    startTime = time.time()
     debugPrint ("Entering SubmitHash2VirusTotal. key: " + str(key) + ", hash: " + str(hash))
     now = time.time()  # seconds since epoch
     virusTotalCallLimitExceeded = False
@@ -357,8 +531,7 @@ def submitHash2VirusTotal (key, hash, pasteData):
         debugPrint ("got a \"scan is still running\" (-2) from Virus Total")
         logVirusTotalScanStillRunning()   # really a placeholder until I write a wait-till-done
     #print (the_page)
-    debugPrint("exiting SubmitHash2VirusTotal, response_code was: " + str(jsonResult['response_code']))
-
+    debugPrint("exiting SubmitHash2VirusTotal, response_code was: " + str(jsonResult['response_code']) + " (%.3f)" % (time.time() - startTime))
 # This is the main processing routine
 def main():
 
@@ -369,6 +542,8 @@ def main():
     initDebug()
     initLogFile()
     getConfigFile()
+    getRegEx()
+    getRegExExclusion()
 
     sawFiles = {}
     stats['duplicatePastes'] = 0
@@ -395,10 +570,17 @@ def main():
 
     try:
         while (currentTime < doneTime) or (runDuration == 0):
-            # Get a new list of available pastes
-            with urllib.request.urlopen('https://scrape.pastebin.com/api_scraping.php?limit='+str(pasteLimit)) as response:
-                newPasteList = response.read()
+            try:
+                # Get a new list of available pastes
+                #
+                response = urllib.request.urlopen('https://scrape.pastebin.com/api_scraping.php?limit='+str(pasteLimit))
+            except Exception as e:
+                debugPrint ("urlopen(\'https://scrape.pastebin.com/api_scraping.php?limit=" + str(pasteLimit) + ")\' threw an exception: " + str(e))
+                logPasteFetchFailed()
+                time.sleep(5) # hopefully the Internet will reboot in a few seconds
+                continue   # go try again
 
+            newPasteList = response.read()
             # Parse the json from above into a python array.  Each element of the array
             # is a dictionary with data for a paste
             if len(newPasteList) > 0:
@@ -406,8 +588,11 @@ def main():
                     jsonResult = json.loads(newPasteList)
                     stats['totalFilesPresented'] += len(jsonResult)
                 except json.decoder.JSONDecodeError:
-                    print ("JSONDecodeError")
+                    print ("JSONDecodeError from Pastebin:")
                     print (newPasteList)
+                    if 'Please slow down' in str(newPasteList):  # They're asking us to slow download
+                        print ("pausing for 60 seconds at request of Pastebin ...")
+                        time.sleep (60)
                     continue
             else:
                 continue
@@ -451,15 +636,27 @@ def main():
                     sawFiles[pasteHash] = 1
                     logPrint ("\n" + str(key))
                     validBinary = False
+                    fileToCheck = pasteData
                     # If it decodes e.g. base64, we'll call it a binary
                     if doDecodeBase64:
                         validBinary, decoded = decodeBase64(key, pasteData)
                     if validBinary:
                         decodedPasteHash = hashlib.sha256(decoded).hexdigest()
+                        fileToCheck = decoded
                         if doScanWithClam:
-                            scanWithClam(key, decoded)
+                            scanWithClam(key, fileToCheck)
                         if doSubmitHash2VirusTotal:
-                            submitHash2VirusTotal(key, decodedPasteHash, decoded)
+                            submitHash2VirusTotal(key, decodedPasteHash, fileToCheck)
+                        [isZipped, unZippedResult] = checkIfZipped (fileToCheck)
+                        if isZipped:
+                            logZippedDetected()
+                            debugPrint ("We got a zipped paste! Length: " + str(len(unZippedResult)))
+                            logPrint (" zipped(" + str((len(unZippedResult))) + ")")
+                            fileToCheck = str(unZippedResult)
+                    # irrespective of being binary or not, check for evil
+                    if doSearchRegEx:
+                        if not excludeWithRegEx (key, fileToCheck):
+                            scanWithRegEx(key, fileToCheck)
                 #  end for pasteObject in jsonResult
 
             # notify if we didn't get all we asked for, otherwise mark time
