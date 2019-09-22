@@ -16,6 +16,10 @@ import gzip
 import io
 
 # define all the global variables here
+configFileName = 'process_pastebin.ini'
+
+debug = False
+
 stats = {}
 statsFileName = '/home/del/Work/Pastebin/stats.txt'
 logFileName = '/home/del/Work/Pastebin/pasteLog.txt'
@@ -25,7 +29,6 @@ pasteKeysSeen = {}
 runDuration = -1
 sleepDuration = -1
 pasteLimit = -1
-debug = False
 debugFileName = "/tmp/process_pastebin-Debug.txt"
 verboseOutput = False
 doScanWithClam = True   # do we can new pastes with Clam AV
@@ -38,17 +41,80 @@ regexToExclude = re.compile("")  # get's the compiled regexToExclude object
 commentRegex = re.compile("\s*#") # Any line starting with '#' is a comment
 virusTotalAPIKey = ''
 virusTotalCallTimes = [] # Array of last four times virutotal was called. Oldest at [0]
+pastePauseDuration = 480 # how long (seconds) to wait if pastebin complains we're hitting too hard
 
 # define all the subroutines/functions we'll be using
 
 def getConfigFile():
     global virusTotalAPIKey
     global doLogRegExExcluded
+    global doScanWithClam
+    global statsFileName
+    global logFileName
+    global regexFileName
+    global regexExcludeFileName
+    global runDuration
+    global sleepDuration
+    global pasteLimit
+    global debug
+    global debugFileName
+    global verboseOutput
+    global doScanWithClam
+    global doSubmitHash2VirusTotal
+    global doLimitVirusTotalHashes
+    global doSearchRegEx
+    global doLogRegExExcluded
+    global virusTotalAPIKey
+    global pastePauseDuration
+
 
     debugPrint("Entering getConfigFile")
     config = configparser.ConfigParser()
+
+
+    def getConfigLogical (defaultValue,configStanza,configEntry):
+        result = defaultValue
+        wasChanged = ' was not changed from \"'
+        if configStanza in config:
+            if configEntry in config[configStanza]:
+                result = (config[configStanza][configEntry] == 'True')
+                wasChanged = ' was changed to \"'
+        debugPrint ("  [" + configStanza + "] " + configEntry + wasChanged + str(result) + "\"")
+        return result
+
+    def getConfigString (defaultValue,configStanza,configEntry):
+        result = defaultValue
+        wasChanged = ' was not changed from \"'
+        if configStanza in config:
+            if configEntry in config[configStanza]:
+                result = str(config[configStanza][configEntry])
+                wasChanged = ' was changed to \"'
+        debugPrint ("  [" + configStanza + "] " + configEntry + wasChanged + str(result) + "\"")
+        return result
+
+    def getConfigInt (defaultValue,configStanza,configEntry):
+        result = defaultValue
+        wasChanged = ' was not changed from \"'
+        if configStanza in config:
+            if configEntry in config[configStanza]:
+                result = int(config[configStanza][configEntry])
+                wasChanged = ' was changed to \"'
+        debugPrint ("  [" + configStanza + "] " + configEntry + wasChanged + str(result) + "\"")
+        return result
+
+    def getConfigFloat (defaultValue,configStanza,configEntry):
+        result = defaultValue
+        wasChanged = ' was not changed from \"'
+        if configStanza in config:
+            if configEntry in config[configStanza]:
+                result = float(config[configStanza][configEntry])
+                wasChanged = ' was changed to \"'
+        debugPrint ("  [" + configStanza + "] " + configEntry + wasChanged + str(result) + "\"")
+        return result
+
+
     try:
-        config.read_file(open('process_pastebin.ini'))
+        config.read_file(open(configFileName))
     except:
         debugPrint ("read of process_pastebin.ini failed:")
         print ("read of process_pastebin.ini failed, exiting")
@@ -57,6 +123,30 @@ def getConfigFile():
         if 'doLogRegExExcluded' in config['default']:
             doLogRegExExcluded = (config['default']['doLogRegExExcluded'] == 'True')
             debugPrint ("doLogRegExExcluded set to: \"" + str(doLogRegExExcluded) + "\"")
+
+
+        doScanWithClam = getConfigLogical (doScanWithClam, 'default', 'doScanWithClam')
+        doScanWithClam = getConfigLogical (doLogRegExExcluded, 'default', 'doLogRegExExcluded')
+        statsFileName = getConfigString (statsFileName, 'default', 'statsFileName')
+        logFileName = getConfigString (logFileName, 'default', 'logFileName')
+        regexFileName = getConfigString (regexFileName, 'default', 'regexFileName')
+        regexExcludeFileName = getConfigString (regexExcludeFileName, 'default', 'regexExcludeFileName')
+        runDuration = getConfigInt (runDuration, 'default', 'runDuration')
+        sleepDuration = getConfigInt (sleepDuration, 'default', 'sleepDuration')
+        pasteLimit = getConfigInt (pasteLimit, 'default', 'pasteLimit')
+        debug = getConfigLogical (debug, 'default', 'debug')
+        debugFileName = getConfigString (debugFileName, 'default', 'debugFileName')
+        verboseOutput = getConfigLogical (verboseOutput, 'default', 'verboseOutput')
+        doScanWithClam = getConfigLogical (doScanWithClam, 'default', 'doScanWithClam')
+        doSubmitHash2VirusTotal = getConfigLogical (doSubmitHash2VirusTotal, 'default', 'doSubmitHash2VirusTotal')
+        doLimitVirusTotalHashes = getConfigLogical (doLimitVirusTotalHashes, 'default', 'doLimitVirusTotalHashes')
+        doSearchRegEx = getConfigLogical (doSearchRegEx, 'default', 'doSearchRegEx')
+        doLogRegExExcluded = getConfigLogical (doLogRegExExcluded, 'default', 'doLogRegExExcluded')
+        pastePauseDuration = getConfigInt (pastePauseDuration, 'default', 'pastePauseDuration')
+
+        virusTotalAPIKey = getConfigString (virusTotalAPIKey, 'VirusTotal', 'virusTotalAPIKey')
+
+
 
     if 'VirusTotal' in config:
         if 'virusTotalAPIKey' in config['VirusTotal']:
@@ -239,7 +329,21 @@ def parseCmdArgs():
     global debug
     global verboseOutput
 
-    parser = argparse.ArgumentParser()
+    global statsFileName
+    global logFileName
+    global regexFileName
+    global regexExcludeFileName
+    global runDuration
+    global debugFileName
+    global doScanWithClam
+    global doSubmitHash2VirusTotal
+    global doSearchRegEx
+    global doRegExExclude
+    global VirusTotalAPIKey
+    global doLogRegExExcluded
+    global pastePauseDuration
+
+    parser = argparse.ArgumentParser(description = "A tool to scrape files from pastebin")
     parser.add_argument("-v", "--verbose", help="increase output verbosity",
         action="store_true")
     parser.add_argument("-d", "--debug", help="turn on debug output",
@@ -250,6 +354,20 @@ def parseCmdArgs():
     parser.add_argument("-s", "--sleepDuration", help="<Sleep Duration (seconds) - how long to wait between queries (default is 60)>", type=int, default = 60)
     #parser.add_argument("pLimit", help="# pastes to request in each call", type=int)
     parser.add_argument("-p","--pasteLimit", help="# pastes to request in each query (default is 100)", type=int, default = 100)
+
+    parser.add_argument("--statsFileName", type = str, help = "Name of file to store run statistics", default = '/home/del/Work/Pastebin/stats.txt')
+    parser.add_argument("--logFileName", type = str, help = "Name of file logging pastes seen", default = '/home/del/Work/Pastebin/pasteLog.txt')
+    parser.add_argument("--regexFileName", type = str, help = "Name of file listing RegEx to match", default = '/home/del/Work/Pastebin/process_pastebin_regex.txt')
+    parser.add_argument("--regexExcludeFileName", type = str, help = "Name of file containing RegEx used to exclude files", default = '/home/del/Work/Pastebin/process_pastebin_regex_exclude.txt')
+    parser.add_argument("--debugFileName", type = str, help = "Name of file for debug output", default = "/tmp/process_pastebin-Debug.txt")
+    parser.add_argument("--doScanWithClam", type = bool, help = "Should files be scanned with Clam AV", default = True)
+    parser.add_argument("--doSubmitHash2VirusTotal", type = bool, help = "Should Virus Total be searched with file hashes", default = True)
+    parser.add_argument("--doSearchRegEx", type = bool, help = "Should RegEx be used to identify interesting pastes", default = True)
+    parser.add_argument("--doRegExExclude", type = bool, help = "Should files be excluded with RegEx", default = True)
+    parser.add_argument("--VirusTotalAPIKey", type = str, help = "API key for Virus Total", default = "")
+    parser.add_argument("--doLogRegExExcluded", type = bool, help = "Should excluded RegEx be logged", default = False)
+    parser.add_argument("--pastePauseDuration", type = int, help = "How long to pause when Pastebin complains", default = pastePauseDuration)
+
     args = parser.parse_args()
 
     #runDuration = args.rDuration * 60  # convert from default minutes to seconds
@@ -261,6 +379,24 @@ def parseCmdArgs():
     pasteLimit = args.pasteLimit
     debug = args.debug
     verboseOutput = args.verbose
+
+    statsFileName = args.statsFileName
+    logFileName = args.logFileName
+    regexFileName = args.regexFileName
+    regexExcludeFileName = args.regexExcludeFileName
+    runDuration = args.runDuration
+    sleepDuration = args.sleepDuration
+    pasteLimit = args.pasteLimit
+    debug = args.debug
+    debugFileName = args.debugFileName
+    doScanWithClam = args.doScanWithClam
+    doSubmitHash2VirusTotal = args.doSubmitHash2VirusTotal
+    doSearchRegEx = args.doSearchRegEx
+    doRegExExclude = args.doRegExExclude
+    VirusTotalAPIKey = args.VirusTotalAPIKey
+    doLogRegExExcluded = args.doLogRegExExcluded
+    pastePauseDuration = args.pastePauseDuration
+
 
 def printStartMessage():
     global runDuration
@@ -488,8 +624,8 @@ def submitHash2VirusTotal (key, hash, pasteData):
     if len(virusTotalCallTimes) == 4:
         if (now - virusTotalCallTimes[0]) <= 60:  # We've already done 4 calls within last minute
             virusTotalCallLimitExceeded = True
-            print ("Exceeded Call Limit.  Key = " + key)
-            debugPrint ("Exceeded Call Limit.  Key = " + key)
+            print ("Exceeded Virus Total Call Limit.  Key = " + key)
+            debugPrint ("Exceeded Virus Total Call Limit.  Key = " + key)
         virusTotalCallTimes[0:2] = virusTotalCallTimes[1:3]
         virusTotalCallTimes[3] = now
     else:
@@ -595,11 +731,13 @@ def main():
                     jsonResult = json.loads(newPasteList)
                     stats['totalFilesPresented'] += len(jsonResult)
                 except json.decoder.JSONDecodeError:
-                    print ("JSONDecodeError from Pastebin:")
+                    debugPrint ("JSONDecodeError from Pastebin: " + str(newPasteList))
+                    msgTime = time.strftime("%x %X", time.localtime())
+                    print ("\n" + msgTime + ": JSONDecodeError from Pastebin:")
                     print (newPasteList)
                     if 'Please slow down' in str(newPasteList):  # They're asking us to slow download
-                        print ("pausing for 60 seconds at request of Pastebin ...")
-                        time.sleep (60)
+                        print ("... pausing for " + str(pastePauseDuration) + " seconds at request of Pastebin ...")
+                        time.sleep (pastePauseDuration)
                     continue
             else:
                 continue
